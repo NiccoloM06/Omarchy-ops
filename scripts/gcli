@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =======================================================================================
+#  GUARDIAN CLI (gcli) | OMARCHY-OPS (v56 - Architettura a 3 Stati con nftables)
+#  Gestisce i profili: on (Paranoid/Tor), off (Standard/DNSCrypt), ops (Proxy/KillSwitch)
+# =======================================================================================
+
+STATE_FILE="/tmp/guardian_status"
+NFT_TABLE="guardian"
+NFT_CHAIN="output"
+GREEN='\033[1;32m'; RED='\033[1;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
+log() { echo -e "${GREEN}[gcli]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[gcli]${NC} $1"; }
+log_success() { echo -e "${GREEN}[gcli]${NC} $1"; }
+log_error() { echo -e "${RED}[gcli]${NC} $1"; }
+
+# --- FUNZIONE DI ATTESA PER TOR ---
+wait_for_tor() {
+    log "In attesa che Tor apra le porte (TransPort 9040)..."
+    local retries=30 count=0
+    until ss -tln | grep -q ":9040" || [ $count -eq $retries ]; do
+        sleep 1; ((count++)); echo -n "."
+    done; echo ""
+    if ! ss -tln | grep -q ":9040"; then
+        log_error "Timeout: Tor non è riuscito ad aprirsi sulla porta 9040."
+        return 1
+    fi
+    log_success "Tor è attivo."
+}
+
+# --- FUNZIONE DI PULIZIA REGOLE ---
+flush_all_rules() {
+    log "Pulizia regole nftables..."
+    sudo nft flush ruleset
+    sudo nft add table inet "$NFT_TABLE"
+    sudo nft add chain inet "$NFT_TABLE" "$NFT_CHAIN" { type filter hook output priority 0\; policy accept\; }
+}
+
+# --- PROFILO OFF (STANDARD) ---
+gcli_off() {
+    log "Modalità Standard (DNSCrypt) in attivazione..."
+    local INTERFACE
+    INTERFACE=$(ip route | awk '/^default/ {print $5; exit}')
+
+    flush_all_rules
+
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    echo "nameserver 127.0.0.1" > /etc/resolv.conf
+    chattr +i /etc/resolv.conf
+
+    systemctl restart dnscrypt-proxy.service
+    systemctl stop tor 2>/dev/null || true
+
+    if [ -n "$INTERFACE" ]; then
+        macchanger -p "$INTERFACE" > /dev/null || log_warn "Impossibile ripristinare il MAC."
+    fi
+
+    echo "STANDARD" > "$STATE_FILE"
+    log_success "Profilo Standard (DNSCrypt) attivo."
+}
+
+# --- PROFILO ON (PARANOID/TOR) ---
+gcli_on() {
+    log "Modalità Paranoid (Tor + KillSwitch) in attivazione..."
+    local INTERFACE TOR_UID
+    INTERFACE=$(ip route | awk '/^default/ {print $5; exit}')
+    TOR_UID=$(id -u tor 2>/dev/null || id -u _tor 2>/dev/null || id -u debian-tor 2>/dev/null || true)
+    if [ -z "$TOR_UID" ]; then log_error "Utente tor non trovato."; exit 1; fi
+    log "UID Tor: $TOR_UID"
+
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    echo "nameserver 127.0.0.1" > /etc/resolv.conf
+    systemctl stop dnscrypt-proxy.service
+    systemctl start tor
+    wait_for_tor || exit 1
+
+    if [ -n "$INTERFACE" ]; then
+        macchanger -r "$INTERFACE" || log_warn "MAC spoofing fallito."
+    fi
+
+    flush_all_rules
+
+    # NAT e regole Tor
+    sudo nft add table inet "$NFT_TABLE"
+    sudo nft add chain inet "$NFT_TABLE" prerouting { type nat hook output priority -100\; }
+    sudo nft add rule inet "$NFT_TABLE" prerouting ip protocol tcp redirect to 9040
+    sudo nft add chain inet "$NFT_TABLE" "$NFT_CHAIN" { type filter hook output priority 0\; policy drop\; }
+    sudo nft add rule inet "$NFT_TABLE" "$NFT_CHAIN" oifname "lo" accept
+    sudo nft add rule inet "$NFT_TABLE" "$NFT_CHAIN" meta skuid "$TOR_UID" accept
+    sudo nft add rule inet "$NFT_TABLE" "$NFT_CHAIN" counter reject with icmp type port-unreachable
+
+    echo "PARANOID" > "$STATE_FILE"
+    log_success "Profilo Paranoid (Tor) attivo. Kill Switch abilitato."
+}
+
+# --- PROFILO OPS (PROXYCHAIN + KILL SWITCH) ---
+gcli_ops() {
+    log "Modalità Operations (Proxychains KillSwitch) in attivazione..."
+    local INTERFACE
+    INTERFACE=$(ip route | awk '/^default/ {print $5; exit}')
+
+    local PROXY_CONF PROXY_IP PROXY_PORT
+    PROXY_CONF=$(grep -vE "^#|^$" /etc/proxychains.conf | tail -n 1)
+    PROXY_IP=$(echo "$PROXY_CONF" | awk '{print $3}')
+    PROXY_PORT=$(echo "$PROXY_CONF" | awk '{print $4}')
+    if [ -z "$PROXY_IP" ] || [ -z "$PROXY_PORT" ]; then
+        log_error "Proxy non configurato correttamente in /etc/proxychains.conf"
+        exit 1
+    fi
+    log "KillSwitch configurato per proxy ${PROXY_IP}:${PROXY_PORT}"
+
+    flush_all_rules
+    systemctl stop tor 2>/dev/null || true
+    [ -n "$INTERFACE" ] && macchanger -r "$INTERFACE" || true
+
+    sudo nft add rule inet "$NFT_TABLE" "$NFT_CHAIN" oifname "lo" accept
+    sudo nft add rule inet "$NFT_TABLE" "$NFT_CHAIN" ip daddr "$PROXY_IP" tcp dport "$PROXY_PORT" accept
+    sudo nft add rule inet "$NFT_TABLE" "$NFT_CHAIN" udp dport 53 accept
+    sudo nft add rule inet "$NFT_TABLE" "$NFT_CHAIN" counter reject with icmp type port-unreachable
+
+    echo "OPERATIONS" > "$STATE_FILE"
+    log_success "Profilo Operations attivo. Solo traffico verso ${PROXY_IP}:${PROXY_PORT} consentito."
+}
+
+# --- PROFILO SHOW ---
+gcli_show() {
+    log "Stato Sicurezza Attuale:"
+    local INTERFACE current_profile dns_server mac_status
+    INTERFACE=$(ip route | awk '/^default/ {print $5; exit}')
+    current_profile=$( [ -f "$STATE_FILE" ] && cat "$STATE_FILE" || echo "SCONOSCIUTO" )
+
+    echo "  - Profilo Attivo: $current_profile"
+    dns_server=$(awk '/nameserver/ {print $2}' /etc/resolv.conf)
+    echo "  - DNS: $dns_server"
+
+    if [ -n "$INTERFACE" ]; then
+        mac_status=$(macchanger -s "$INTERFACE" 2>/dev/null || echo "MAC: errore lettura")
+        echo "  - $mac_status"
+    fi
+
+    if sudo nft list table inet "$NFT_TABLE" | grep -q "reject"; then
+        echo "  - Firewall: Kill Switch ATTIVO (nftables)"
+    else
+        echo "  - Firewall: Standard (nessuna regola di blocco)"
+    fi
+}
+
+# --- PARSING COMANDI ---
+case "${1:-}" in
+    on) gcli_on ;;
+    off) gcli_off ;;
+    ops) gcli_ops ;;
+    show) gcli_show ;;
+    *)
+        echo "Usage: sudo $0 <on|off|ops|show>"
+        exit 1
+        ;;
+esac
+R
+

@@ -1,0 +1,21 @@
+# =======================================================================================
+#  CONFIGURAZIONE DNScrypt-proxy | OMARCHY-OPS
+#  Configurato per usare esclusivamente i server sicuri di Quad9.
+# =======================================================================================
+server_names = ['quad9-dnscrypt-ip4-filter-pri', 'quad9-dnscrypt-ip4-filter-alt']
+
+listen_addresses = ['127.0.0.1:53']
+
+# Richiedi server che non loggano le query
+require_nolog = true
+
+# Richiedi server che validano DNSSEC
+require_dnssec = true
+
+# Disabilita l'uso di IPv6 per evitare potenziali leak se non necessario
+ipv6_servers = false
+
+# File di fallback (usato solo se i server primari falliscono)
+fallback_resolver = '9.9.9.9:53'
+
+cache = true
