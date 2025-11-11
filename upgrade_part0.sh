@@ -11,9 +11,33 @@ log_err() { echo -e "${RED}[part0]${NC} $1"; }
 # ==========================================================
 
 log "Aggiornamento sistema..."
+# Garantisce che /tmp sia scrivibile da tutti (fix per ambienti root-only)
+rm -f /tmp/install.log 2>/dev/null || true  # Rimuove vecchi log bloccati
+touch /tmp/install.log
+chmod 666 /tmp/install.log || true   
 
-sudo chmod +x ~/Omarchy-ops/install.sh
-sudo ./install.sh
+# --- Determina l'utente reale (non root) ---
+if [ "${SUDO_USER:-}" != "" ]; then
+  REAL_USER="$SUDO_USER"
+else
+  REAL_USER="$USER"
+fi
+REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
+
+if [ "$EUID" -ne 0 ]; then
+  log_warn "⚠️  Stai eseguendo come root. Alcune operazioni AUR potrebbero fallire."
+fi
+
+# --- 1. Installazione pacchetti base (via install.sh) ---
+if [ -f "./install.sh" ]; then
+  log "Avvio installazione pacchetti principali..."
+  chmod +x ./install.sh
+  sudo -u "$REAL_USER" bash ./install.sh
+else
+  log_error "install.sh non trovato nella directory corrente!"
+  exit 1
+fi
+
 # --- Clone Typecraft omarchy-supplement ---
 SUPP_DIR="/opt/omarchy-supplement"
 if [ ! -d "$SUPP_DIR/.git" ]; then
@@ -23,7 +47,8 @@ else
   log "Aggiornamento repo omarchy-supplement..."
   sudo git -C "$SUPP_DIR" pull --ff-only
 fi
-
+sudo chmod +x install.sh
+./install.sh
 # --- System tuning ---
 if [ -f "./scripts/system_tuning.sh" ]; then
   log "Eseguo ottimizzazioni di sistema..."

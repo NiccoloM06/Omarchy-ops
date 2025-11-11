@@ -23,17 +23,17 @@ log_message="[$ts] ${color}[$level]${NC} $msg"
 echo -e "$log_message" >> "$LOG_FILE"
 if [ "$level" == "ERROR" ]; then
 	echo -e "$log_message" >&2
-else
-	echo -e "$log_messagge"
+#else
+#	echo -e "$log_messagge"
 fi
 }
 log_info() { log "INFO" "$1"; }
 log_warn() { log "WARN" "$1"; }
-log_success() { log "SUCCESS"  "$1" }
-log_error() { log "ERROR" "$1" }
+log_success() { log "SUCCESS"  "$1"; }
+log_error() { log "ERROR" "$1"; }
 
 
-trap 'log_error "Installazione FASE INSTALLAZIONE fallita. " >&2' ERR
+trap 'log_error "Installazione FASE INSTALLAZIONE fallita. :((" >&2' ERR
 
 >"$LOG_FILE"
 exec &> >(tee -a "$LOG_FILE")
@@ -42,6 +42,12 @@ export SUDO_USER=${SUDO_USER:-$USER}
 log "Avvio installazione pachetti"
 sudo pacman -Syyu --noconfirm
 sudo yay -Syyu --noconfirm
+
+# Rimuove la versione OpenBSD prima di installare GNU netcat
+if pacman -Qi openbsd-netcat &>/dev/null; then
+  sudo pacman -R --noconfirm openbsd-netcat
+fi
+
 
 # Rilevazione paru e instllazione 
 if command -v paru &> /dev/null; then
@@ -62,28 +68,16 @@ echo "Verrà chiesta la password di sudo..."
 # Include i tuoi tool di base, hardening, monitoring E i tool di security
 echo "--- Fase 1: Installazione pacchetti da Pacman (Ufficiali + Black Arch)... ---" | tee -a "$LOG_FILE"
 
-sudo pacman -S --noconfirm --needed \
-\
-# --- BASE E UTILITY ---
-git curl wget zsh starship fzf bat exa lsd zoxide \
+sudo pacman -S --noconfirm --needed git curl wget zsh starship fzf bat exa lsd zoxide \
 ansible chezmoi just \
-\
-# --- HARDENING E MONITORING ---
-chkrootkit rkhunter lynis clamav audit apparmor apparmor-utils nftables crowdsec \
-firejail firejail-profiles flatpak osquery restic rclone \
-glances bpytop htop bpftrace tracee netdata prometheus prometheus-node-exporter grafana \
+chkrootkit rkhunter lynis clamav audit apparmor nftables flatpak osquery restic rclone \
+glances bpytop htop bpftrace netdata prometheus prometheus-node-exporter grafana \
 lnav logwatch \
 yara maltrail zram-generator \
-\
-# --- PRIVACY E RETE ---
 torsocks nyx onionshare proxychains-ng wireguard-tools unbound dnscrypt-proxy \
 keepassxc gopass age gnupg macchanger secure-delete pass \
-\
-# --- CONTAINERIZATION E FORENSICS ---
-bubblewrap podman systemd-nspawn \
+bubblewrap podman systemd \
 testdisk foremost hashdeep \
-\
-# --- TOOL DI HACKING ---
 nmap wireshark-qt tcpdump mitmproxy 
 
 
@@ -104,7 +98,8 @@ pacu \
 scoutsuite \
 aws-cli-v2 \
 payloadsallthethings-git \
-linpeas-git ffuf amass burpsuite sqlmap nikto hashcat john hydra aircrack-ng reaver bettercap metasploit exploitdb gnu-netcat autopsy ghidra set maltego spiderfoot sherlock jadx apktool frida-tools binwalk flashrom qemu-user-static
+linpeas-git ffuf amass burpsuite sqlmap nikto hashcat john hydra aircrack-ng reaver bettercap metasploit exploitdb gnu-netcat autopsy ghidra set maltego spiderfoot sherlock jadx apktool frida-tools binwalk flashrom qemu-user-static\
+crowdsec firejail-git tracee-ebpf-git
 
 # Controllo dell'errore per Yay
 if [ ${PIPESTATUS[0]} -ne 0 ]; then
